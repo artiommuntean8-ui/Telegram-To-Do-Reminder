@@ -41,15 +41,32 @@ async def send_reminder(user_id: int, text: str):
     await bot.send_message(user_id, f"⏰ Напоминание:\n{text}")
 
 
-def schedule_reminder(task_id, user_id, text, remind_at):
+def schedule_reminder(task_id: int, user_id: int, text: str, remind_at: str):
     run_date = datetime.fromisoformat(remind_at)
     scheduler.add_job(
         send_reminder,
         "date",
         run_date=run_date,
         args=[user_id, text],
-        id=str(task_id)
+        id=str(task_id),
+        misfire_grace_time=3600  # Run job even if bot was down, up to 1 hour late
     )
+
+
+async def load_and_schedule_tasks():
+    """Loads pending tasks from DB and schedules them on bot startup."""
+    print("Loading and scheduling tasks on startup...")
+    now = datetime.now()
+    cursor.execute("SELECT id, user_id, text, remind_at FROM tasks WHERE done = 0")
+    tasks = cursor.fetchall()
+    scheduled_count = 0
+    for task in tasks:
+        task_id, user_id, text, remind_at_str = task
+        remind_at = datetime.fromisoformat(remind_at_str)
+        if remind_at > now:
+            schedule_reminder(task_id, user_id, text, remind_at_str)
+            scheduled_count += 1
+    print(f"Scheduled {scheduled_count} future tasks.")
 
 
 # ---------- COMMANDS ----------
@@ -57,23 +74,42 @@ def schedule_reminder(task_id, user_id, text, remind_at):
 async def start(message: types.Message):
     await message.answer(
         "👋 Привет! Я To-Do Reminder Bot\n\n"
-        "/add Задача | YYYY-MM-DD HH:MM\n"
-        "/list — список задач\n"
-        "/done ID — завершить\n"
-        "/delete ID — удалить"
+        "Я помогу тебе не забыть о важных делах.\n\n"
+        "<b>Команды:</b>\n"
+        "/add <code>Задача | ГГГГ-ММ-ДД ЧЧ:ММ</code> - добавить задачу\n"
+        "/list - показать активные задачи\n"
+        "/done <code>ID</code> - отметить задачу как выполненную\n"
+        "/delete <code>ID</code> - удалить задачу\n\n"
+        "Используй /list чтобы увидеть ID своих задач.",
+        parse_mode="HTML"
     )
 
 
 @dp.message(Command("add"))
 async def add_task(message: types.Message):
     try:
-        data = message.text.replace("/add", "").strip()
-        text, time_str = data.split("|")
-        remind_at = datetime.strptime(time_str.strip(), "%Y-%m-%d %H:%M")
+        command_args = message.text.replace("/add", "").strip()
+
+        if "|" not in command_args:
+            await message.answer("❌ Ошибка: отсутствует разделитель '|'.\nФормат: /add Текст | Дата")
+            return
+
+        text, time_str = command_args.split("|", 1)
+        text = text.strip()
+        time_str = time_str.strip()
+
+        if not text:
+            await message.answer("❌ Ошибка: текст задачи не может быть пустым.")
+            return
+
+        remind_at = datetime.strptime(time_str, "%Y-%m-%d %H:%M")
+
+        if remind_at < datetime.now():
+            await message.answer("🤔 Дата напоминания в прошлом, но я все равно добавил задачу.")
 
         cursor.execute(
             "INSERT INTO tasks (user_id, text, remind_at) VALUES (?, ?, ?)",
-            (message.from_user.id, text.strip(), remind_at.isoformat())
+            (message.from_user.id, text, remind_at.isoformat())
         )
         conn.commit()
 
@@ -81,60 +117,93 @@ async def add_task(message: types.Message):
         schedule_reminder(
             task_id,
             message.from_user.id,
-            text.strip(),
+            text,
             remind_at.isoformat()
         )
 
         await message.answer("✅ Задача добавлена")
-    except Exception:
-        await message.answer("❌ Формат:\n/add Текст | 2026-01-05 18:30")
+    except ValueError:
+        await message.answer(
+            "❌ Неверный формат даты. Используйте ГГГГ-ММ-ДД ЧЧ:ММ\n"
+            "Пример: /add Сделать отчет | 2024-12-31 23:59"
+        )
 
 
 @dp.message(Command("list"))
 async def list_tasks(message: types.Message):
     cursor.execute(
-        "SELECT id, text, remind_at, done FROM tasks WHERE user_id=?",
+        "SELECT id, text, remind_at FROM tasks WHERE user_id=? AND done=0 ORDER BY remind_at",
         (message.from_user.id,)
     )
     rows = cursor.fetchall()
 
     if not rows:
-        await message.answer("📭 Задач нет")
+        await message.answer("🎉 У вас нет активных задач!")
         return
 
-    reply = "📋 Твои задачи:\n\n"
+    reply = "📋 Ваши активные задачи:\n\n"
     for task in rows:
-        status = "✅" if task[3] else "⏳"
-        reply += f"{task[0]}. {task[1]} ({task[2]}) {status}\n"
+        # task is (id, text, remind_at)
+        remind_time = datetime.fromisoformat(task[2]).strftime("%Y-%m-%d %H:%M")
+        reply += f"<b>{task[0]}</b>. {task[1]} (<i>{remind_time}</i>)\n"
 
-    await message.answer(reply)
+    await message.answer(reply, parse_mode="HTML")
 
 
 @dp.message(Command("done"))
 async def done_task(message: types.Message):
-    task_id = message.text.replace("/done", "").strip()
-    cursor.execute("UPDATE tasks SET done=1 WHERE id=?", (task_id,))
+    try:
+        task_id = int(message.text.replace("/done", "").strip())
+    except ValueError:
+        await message.answer("❌ Укажите корректный ID задачи.\nПример: /done 123")
+        return
+
+    cursor.execute(
+        "UPDATE tasks SET done=1 WHERE id=? AND user_id=?",
+        (task_id, message.from_user.id)
+    )
     conn.commit()
-    await message.answer("✅ Задача выполнена")
+
+    if cursor.rowcount == 0:
+        await message.answer("🤔 Задача с таким ID не найдена или она вам не принадлежит.")
+    else:
+        try:
+            scheduler.remove_job(str(task_id))
+        except Exception:  # JobLookupError
+            pass  # Job was already triggered or never existed, which is fine
+        await message.answer("✅ Задача отмечена как выполненная.")
 
 
 @dp.message(Command("delete"))
 async def delete_task(message: types.Message):
-    task_id = message.text.replace("/delete", "").strip()
-    cursor.execute("DELETE FROM tasks WHERE id=?", (task_id,))
+    try:
+        task_id = int(message.text.replace("/delete", "").strip())
+    except ValueError:
+        await message.answer("❌ Укажите корректный ID задачи.\nПример: /delete 123")
+        return
+
+    cursor.execute(
+        "DELETE FROM tasks WHERE id=? AND user_id=?",
+        (task_id, message.from_user.id)
+    )
     conn.commit()
 
+    if cursor.rowcount == 0:
+        await message.answer("🤔 Задача с таким ID не найдена или она вам не принадлежит.")
+        return
+
     try:
-        scheduler.remove_job(task_id)
-    except:
+        scheduler.remove_job(str(task_id))
+    except Exception:  # JobLookupError
         pass
 
-    await message.answer("🗑 Задача удалена")
+    await message.answer("🗑 Задача удалена.")
 
 
 # ---------- START ----------
 async def main():
     scheduler.start()
+    await load_and_schedule_tasks()
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
