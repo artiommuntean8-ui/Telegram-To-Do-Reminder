@@ -2,9 +2,11 @@ import asyncio
 import sqlite3
 import os
 from datetime import datetime
+import logging
 
-from aiogram import Bot, Dispatcher, types
+from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
 
@@ -19,6 +21,9 @@ if not TOKEN:
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 scheduler = AsyncIOScheduler()
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
 
 # ---------- DATABASE ----------
 conn = sqlite3.connect("tasks.db")
@@ -37,8 +42,12 @@ conn.commit()
 
 
 # ---------- REMINDER ----------
-async def send_reminder(user_id: int, text: str):
-    await bot.send_message(user_id, f"⏰ Напоминание:\n{text}")
+async def send_reminder(user_id: int, text: str, task_id: int):
+    # Add an inline button to mark the task as done immediately
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Выполнено", callback_data=f"done_{task_id}")]
+    ])
+    await bot.send_message(user_id, f"⏰ Напоминание:\n{text}", reply_markup=keyboard)
 
 
 def schedule_reminder(task_id: int, user_id: int, text: str, remind_at: str):
@@ -47,7 +56,7 @@ def schedule_reminder(task_id: int, user_id: int, text: str, remind_at: str):
         send_reminder,
         "date",
         run_date=run_date,
-        args=[user_id, text],
+        args=[user_id, text, task_id],
         id=str(task_id),
         misfire_grace_time=3600  # Run job even if bot was down, up to 1 hour late
     )
@@ -102,7 +111,13 @@ async def add_task(message: types.Message):
             await message.answer("❌ Ошибка: текст задачи не может быть пустым.")
             return
 
-        remind_at = datetime.strptime(time_str, "%Y-%m-%d %H:%M")
+        try:
+            # Try parsing full date and time
+            remind_at = datetime.strptime(time_str, "%Y-%m-%d %H:%M")
+        except ValueError:
+            # If that fails, try parsing just the time (assuming today)
+            time_val = datetime.strptime(time_str, "%H:%M").time()
+            remind_at = datetime.combine(datetime.now().date(), time_val)
 
         if remind_at < datetime.now():
             await message.answer("🤔 Дата напоминания в прошлом, но я все равно добавил задачу.")
@@ -124,7 +139,7 @@ async def add_task(message: types.Message):
         await message.answer("✅ Задача добавлена")
     except ValueError:
         await message.answer(
-            "❌ Неверный формат даты. Используйте ГГГГ-ММ-ДД ЧЧ:ММ\n"
+            "❌ Неверный формат даты. Используйте ГГГГ-ММ-ДД ЧЧ:ММ или просто ЧЧ:ММ (сегодня)\n"
             "Пример: /add Сделать отчет | 2024-12-31 23:59"
         )
 
@@ -172,6 +187,21 @@ async def done_task(message: types.Message):
         except Exception:  # JobLookupError
             pass  # Job was already triggered or never existed, which is fine
         await message.answer("✅ Задача отмечена как выполненная.")
+
+
+@dp.callback_query(F.data.startswith("done_"))
+async def process_done_callback(callback: CallbackQuery):
+    """Handles the 'Done' button click on reminder messages."""
+    task_id = int(callback.data.split("_")[1])
+
+    cursor.execute(
+        "UPDATE tasks SET done=1 WHERE id=?",
+        (task_id,)
+    )
+    conn.commit()
+
+    await callback.answer("Задача выполнена!")
+    await callback.message.edit_text(callback.message.text + "\n\n✅ Задача выполнена!", reply_markup=None)
 
 
 @dp.message(Command("delete"))
