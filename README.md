@@ -4,20 +4,22 @@ A simple yet effective Telegram bot to help you manage your to-do list and get r
 
 ## Features
 
--   Add tasks with a specific reminder time.
+-   Add tasks with a specific reminder time (supports full date or just time for today).
 -   List all your active tasks.
--   Mark tasks as completed.
+-   Mark tasks as completed via command or interactive button.
 -   Delete tasks.
+-   Clear all completed tasks at once.
 -   Get timely reminders for your tasks.
 -   Persistent reminders: Even if the bot restarts, your reminders are safe.
 
 ## Commands
 
 -   `/start` - Displays a welcome message and lists all available commands.
--   `/add <Task Text> | <YYYY-MM-DD HH:MM>` - Adds a new task with a reminder.
+-   `/add <Task Text> | <Time>` - Adds a new task. Example: `/add Buy Milk | 18:00` or `/add Report | 2024-12-31 23:59`.
 -   `/list` - Shows a list of your active (pending) tasks with their IDs.
 -   `/done <ID>` - Marks a task as completed. The reminder for this task will be cancelled.
 -   `/delete <ID>` - Deletes a task and its corresponding reminder.
+-   `/clear` - Deletes all completed tasks from the database.
 
 ## Setup and Installation
 

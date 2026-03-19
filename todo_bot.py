@@ -88,7 +88,8 @@ async def start(message: types.Message):
         "/add <code>Задача | ГГГГ-ММ-ДД ЧЧ:ММ</code> - добавить задачу\n"
         "/list - показать активные задачи\n"
         "/done <code>ID</code> - отметить задачу как выполненную\n"
-        "/delete <code>ID</code> - удалить задачу\n\n"
+        "/delete <code>ID</code> - удалить задачу\n"
+        "/clear - удалить все выполненные задачи\n\n"
         "Используй /list чтобы увидеть ID своих задач.",
         parse_mode="HTML"
     )
@@ -228,6 +229,16 @@ async def delete_task(message: types.Message):
         pass
 
     await message.answer("🗑 Задача удалена.")
+
+
+@dp.message(Command("clear"))
+async def clear_completed_tasks(message: types.Message):
+    cursor.execute(
+        "DELETE FROM tasks WHERE user_id=? AND done=1",
+        (message.from_user.id,)
+    )
+    conn.commit()
+    await message.answer(f"🧹 Удалено {cursor.rowcount} выполненных задач.")
 
 
 # ---------- START ----------
